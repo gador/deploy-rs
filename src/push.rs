@@ -192,7 +192,10 @@ pub async fn push_profile(data: PushProfileData<'_>) -> Result<(), PushProfileEr
             a => return Err(PushProfileError::BuildErrorCode(a)),
         };
 
-        let ca_path = String::from_utf8(build_output.stdout).unwrap();
+        let ca_path = String::from_utf8(build_output.stdout)
+            .unwrap()
+            .trim()
+            .to_string();
         local_ca_data.path = ca_path;
         debug!("Actual output path is {}", local_ca_data.path);
     } else {
