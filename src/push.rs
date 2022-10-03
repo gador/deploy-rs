@@ -26,13 +26,13 @@ pub enum PushProfileError {
     #[error("Nix build command resulted in a bad exit code: {0:?}")]
     BuildExit(Option<i32>),
     #[error(
-        "Activation script deploy-rs-activate does not exist in profile.\n\
+        "Activation script deploy-rs-activate does not exist in profile path {0}.\n\
              Did you forget to use deploy-rs#lib.<...>.activate.<...> on your profile path?"
     )]
-    DeployRsActivateDoesntExist,
-    #[error("Activation script activate-rs does not exist in profile.\n\
+    DeployRsActivateDoesntExist(String),
+    #[error("Activation script activate-rs does not exist in profile path {0}.\n\
              Is there a mismatch in deploy-rs used in the flake you're deploying and deploy-rs command you're running?")]
-    ActivateRsDoesntExist,
+    ActivateRsDoesntExist(String),
     #[error("Failed to run Nix sign command: {0}")]
     Sign(std::io::Error),
     #[error("Nix sign command resulted in a bad exit code: {0:?}")]
@@ -172,13 +172,11 @@ pub async fn push_profile(data: PushProfileData<'_>) -> Result<(), PushProfileEr
     }
 
     if local_ca_data.is_ca {
-        debug!(
-            "Trying to catch output path after build of the CA derivation",
-        );
+        debug!("Trying to catch output path after build of the CA derivation",);
         // since this is a CA derivation, the original path is invalid
         // we need to run "nix build" to return the actual path
         build_command.arg("--print-out-paths");
-        
+
         let build_child = build_command
             .stdout(Stdio::piped())
             .spawn()
@@ -196,10 +194,7 @@ pub async fn push_profile(data: PushProfileData<'_>) -> Result<(), PushProfileEr
 
         let ca_path = String::from_utf8(build_output.stdout).unwrap();
         local_ca_data.path = ca_path;
-        debug!(
-            "Actual output path is {}",
-            local_ca_data.path
-        );
+        debug!("Actual output path is {}", local_ca_data.path);
     } else {
         let build_exit_status = build_command
             // Logging should be in stderr, this just stops the store path from printing for no reason
@@ -215,12 +210,18 @@ pub async fn push_profile(data: PushProfileData<'_>) -> Result<(), PushProfileEr
     };
 
     if local_ca_data.is_ca {
-        //
-        if !Path::new(format!("{}/deploy-rs-activate", local_ca_data.path).as_str()).exists() {
-            return Err(PushProfileError::DeployRsActivateDoesntExist);
+        let rs_deploy_path_ca = format!("{}/deploy-rs-activate", local_ca_data.path);
+        let rs_activate_path_ca = format!("{}/activate-rs", local_ca_data.path);
+
+        if !Path::new(rs_deploy_path_ca.as_str()).exists() {
+            return Err(PushProfileError::DeployRsActivateDoesntExist(
+                rs_deploy_path_ca.to_string(),
+            ));
         }
-        if !Path::new(format!("{}/activate-rs", local_ca_data.path).as_str()).exists() {
-            return Err(PushProfileError::ActivateRsDoesntExist);
+        if !Path::new(rs_activate_path_ca.as_str()).exists() {
+            return Err(PushProfileError::ActivateRsDoesntExist(
+                rs_activate_path_ca.to_string(),
+            ));
         }
         if let Ok(local_key) = std::env::var("LOCAL_KEY") {
             info!(
@@ -244,27 +245,23 @@ pub async fn push_profile(data: PushProfileData<'_>) -> Result<(), PushProfileEr
             };
         }
     } else {
-        if !Path::new(
-            format!(
-                "{}/deploy-rs-activate",
-                data.deploy_data.profile.profile_settings.path
-            )
-            .as_str(),
-        )
-        .exists()
-        {
-            return Err(PushProfileError::DeployRsActivateDoesntExist);
+        let rs_deploy_path = format!(
+            "{}/deploy-rs-activate",
+            data.deploy_data.profile.profile_settings.path
+        );
+        let rs_activate_path = format!(
+            "{}/activate-rs",
+            data.deploy_data.profile.profile_settings.path
+        );
+        if !Path::new(rs_deploy_path.as_str()).exists() {
+            return Err(PushProfileError::DeployRsActivateDoesntExist(
+                rs_deploy_path.to_string(),
+            ));
         }
-        if !Path::new(
-            format!(
-                "{}/activate-rs",
-                data.deploy_data.profile.profile_settings.path
-            )
-            .as_str(),
-        )
-        .exists()
-        {
-            return Err(PushProfileError::ActivateRsDoesntExist);
+        if !Path::new(rs_activate_path.as_str()).exists() {
+            return Err(PushProfileError::ActivateRsDoesntExist(
+                rs_activate_path.to_string(),
+            ));
         }
         if let Ok(local_key) = std::env::var("LOCAL_KEY") {
             info!(
