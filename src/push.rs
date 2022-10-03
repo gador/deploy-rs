@@ -41,6 +41,8 @@ pub enum PushProfileError {
     Copy(std::io::Error),
     #[error("Nix copy command resulted in a bad exit code: {0:?}")]
     CopyExit(Option<i32>),
+    #[error("Cannot build a content-addressed derivation without a flake.")]
+    CADerivationNonFlake,
 }
 
 pub struct PushProfileData<'a> {
@@ -60,38 +62,8 @@ pub async fn push_profile(data: PushProfileData<'_>) -> Result<(), PushProfileEr
         &data.deploy_data.profile.profile_settings.path
     );
 
-    // `nix-store --query --deriver` doesn't work on invalid paths, so we parse output of show-derivation :(
-    let mut show_derivation_command = Command::new("nix");
-
-    show_derivation_command
-        .arg("show-derivation")
-        .arg(&data.deploy_data.profile.profile_settings.path);
-
-    let show_derivation_output = show_derivation_command
-        .output()
-        .await
-        .map_err(PushProfileError::ShowDerivation)?;
-
-    match show_derivation_output.status.code() {
-        Some(0) => (),
-        a => return Err(PushProfileError::ShowDerivationExit(a)),
-    };
-
-    let derivation_info: HashMap<&str, serde_json::value::Value> = serde_json::from_str(
-        std::str::from_utf8(&show_derivation_output.stdout)
-            .map_err(PushProfileError::ShowDerivationUtf8)?,
-    )
-    .map_err(PushProfileError::ShowDerivationParse)?;
-
-    let derivation_name = derivation_info
-        .keys()
-        .next()
-        .ok_or(PushProfileError::ShowDerivationEmpty)?;
-
-    info!(
-        "Building profile `{}` for node `{}`",
-        data.deploy_data.profile_name, data.deploy_data.node_name
-    );
+    // Check for store path. If it is e.g. "/hash" we have a CA and no out path
+    // TODO: Add non-flake support
 
     let mut build_command = if data.supports_flakes {
         Command::new("nix")
@@ -99,11 +71,70 @@ pub async fn push_profile(data: PushProfileData<'_>) -> Result<(), PushProfileEr
         Command::new("nix-build")
     };
 
-    if data.supports_flakes {
-        build_command.arg("build").arg(derivation_name)
+    if !&data
+        .deploy_data
+        .profile
+        .profile_settings
+        .path
+        .starts_with("/nix/store")
+    {
+        // we are not in a store path. Most likely we try to build a CA derivation
+        info!(
+            "The path {} does not start with \"nix/store\", so we will assume this is a content-addressed derivation",
+            &data.deploy_data.profile.profile_settings.path
+        );
+        if !data.supports_flakes {
+            return Err(PushProfileError::CADerivationNonFlake);
+        };
+        //TODO: Is it always ".deploy"?
+        build_command.arg("build").arg(
+            data.repo.to_string()
+                + "#deploy.nodes."
+                + data.deploy_data.node_name
+                + ".profiles."
+                + data.deploy_data.profile_name
+                + ".path",
+        )
     } else {
-        build_command.arg(derivation_name)
+        // `nix-store --query --deriver` doesn't work on invalid paths, so we parse output of show-derivation :(
+        let mut show_derivation_command = Command::new("nix");
+
+        show_derivation_command
+            .arg("show-derivation")
+            .arg(&data.deploy_data.profile.profile_settings.path);
+
+        let show_derivation_output = show_derivation_command
+            .output()
+            .await
+            .map_err(PushProfileError::ShowDerivation)?;
+
+        match show_derivation_output.status.code() {
+            Some(0) => (),
+            a => return Err(PushProfileError::ShowDerivationExit(a)),
+        };
+
+        let derivation_info: HashMap<&str, serde_json::value::Value> = serde_json::from_str(
+            std::str::from_utf8(&show_derivation_output.stdout)
+                .map_err(PushProfileError::ShowDerivationUtf8)?,
+        )
+        .map_err(PushProfileError::ShowDerivationParse)?;
+
+        let derivation_name = derivation_info
+            .keys()
+            .next()
+            .ok_or(PushProfileError::ShowDerivationEmpty)?;
+
+        if data.supports_flakes {
+            build_command.arg("build").arg(derivation_name)
+        } else {
+            build_command.arg(derivation_name)
+        }
     };
+
+    info!(
+        "Building profile `{}` for node `{}`",
+        data.deploy_data.profile_name, data.deploy_data.node_name
+    );
 
     match (data.keep_result, data.supports_flakes) {
         (true, _) => {
