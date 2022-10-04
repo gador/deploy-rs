@@ -517,19 +517,49 @@ async fn run_deploy(
     )> = Vec::new();
 
     for (deploy_flake, data, (node_name, node), (profile_name, profile)) in to_deploy {
-        let deploy_data = deploy::make_deploy_data(
+        let mut deploy_data = deploy::make_deploy_data(
             &data.generic_settings,
             node,
             node_name,
-            profile,
+            profile.clone(),
             profile_name,
             cmd_overrides,
             debug_logs,
             log_dir.as_deref(),
         );
 
-        let deploy_defs = deploy_data.defs()?;
+        // check if CA and build output path if necessary
+        if deploy_data
+            .profile
+            .profile_settings
+            .path
+            .starts_with("/nix/store")
+        {
+            continue;
+        } else {
+            debug!("We've detected a CA derivation. To calculate the correct path, we will need to build it first.\n\
+            This might take a while.");
+            let new_path = match deploy::eval::eval_profile(deploy::eval::EvalProfileData {
+                supports_flakes,
+                repo: deploy_flake.repo,
+                deploy_data: &deploy_data,
+                extra_build_args,
+            })
+            .await
+            {
+                Ok(x) => x,
+                Err(_) => "".to_string(),
+            };
+            if !new_path.is_empty() {
+                debug!(
+                    "Changing original deployment path {} to new nóne: {}",
+                    deploy_data.profile.profile_settings.path, new_path
+                );
+                deploy_data.profile.profile_settings.path = new_path;
+            }
+        };
 
+        let deploy_defs = deploy_data.defs()?;
         parts.push((deploy_flake, deploy_data, deploy_defs));
     }
 

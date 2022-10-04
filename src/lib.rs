@@ -149,6 +149,7 @@ pub mod data;
 pub mod deploy;
 pub mod push;
 pub mod cli;
+pub mod eval;
 
 #[derive(Debug)]
 pub struct CmdOverrides {
@@ -315,7 +316,7 @@ pub struct DeployData<'a> {
     pub node_name: &'a str,
     pub node: &'a data::Node,
     pub profile_name: &'a str,
-    pub profile: &'a data::Profile,
+    pub profile: data::Profile,
 
     pub cmd_overrides: &'a CmdOverrides,
 
@@ -406,7 +407,7 @@ pub fn make_deploy_data<'a, 's>(
     top_settings: &'s data::GenericSettings,
     node: &'a data::Node,
     node_name: &'a str,
-    profile: &'a data::Profile,
+    profile: data::Profile,
     profile_name: &'a str,
     cmd_overrides: &'a CmdOverrides,
     debug_logs: bool,

@@ -26,13 +26,13 @@ pub enum PushProfileError {
     #[error("Nix build command resulted in a bad exit code: {0:?}")]
     BuildExit(Option<i32>),
     #[error(
-        "Activation script deploy-rs-activate does not exist in profile path {0}.\n\
+        "Activation script deploy-rs-activate does not exist in profile.\n\
              Did you forget to use deploy-rs#lib.<...>.activate.<...> on your profile path?"
     )]
-    DeployRsActivateDoesntExist(String),
-    #[error("Activation script activate-rs does not exist in profile path {0}.\n\
+    DeployRsActivateDoesntExist,
+    #[error("Activation script activate-rs does not exist in profile.\n\
              Is there a mismatch in deploy-rs used in the flake you're deploying and deploy-rs command you're running?")]
-    ActivateRsDoesntExist(String),
+    ActivateRsDoesntExist,
     #[error("Failed to run Nix sign command: {0}")]
     Sign(std::io::Error),
     #[error("Nix sign command resulted in a bad exit code: {0:?}")]
@@ -41,14 +41,6 @@ pub enum PushProfileError {
     Copy(std::io::Error),
     #[error("Nix copy command resulted in a bad exit code: {0:?}")]
     CopyExit(Option<i32>),
-    #[error("Cannot build a content-addressed derivation without a flake.")]
-    CADerivationNonFlake,
-    #[error("Failed to start Nix build command: {0}")]
-    BuildErrorStart(std::io::Error),
-    #[error("Nix build command finished with error: {0}")]
-    BuildErrorRun(std::io::Error),
-    #[error("Nix build command finished with errorcode: {0:?}")]
-    BuildErrorCode(Option<i32>),
 }
 
 pub struct PushProfileData<'a> {
@@ -62,19 +54,44 @@ pub struct PushProfileData<'a> {
     pub extra_build_args: &'a [String],
 }
 
-pub struct CaData {
-    pub is_ca: bool,
-    pub path: String, //the actual build path
-}
-
 pub async fn push_profile(data: PushProfileData<'_>) -> Result<(), PushProfileError> {
     debug!(
         "Finding the deriver of store path for {}",
         &data.deploy_data.profile.profile_settings.path
     );
 
-    // Check for store path. If it is e.g. "/hash" we have a CA and no out path
-    // TODO: Add non-flake support
+    // `nix-store --query --deriver` doesn't work on invalid paths, so we parse output of show-derivation :(
+    let mut show_derivation_command = Command::new("nix");
+
+    show_derivation_command
+        .arg("show-derivation")
+        .arg(&data.deploy_data.profile.profile_settings.path);
+
+    let show_derivation_output = show_derivation_command
+        .output()
+        .await
+        .map_err(PushProfileError::ShowDerivation)?;
+
+    match show_derivation_output.status.code() {
+        Some(0) => (),
+        a => return Err(PushProfileError::ShowDerivationExit(a)),
+    };
+
+    let derivation_info: HashMap<&str, serde_json::value::Value> = serde_json::from_str(
+        std::str::from_utf8(&show_derivation_output.stdout)
+            .map_err(PushProfileError::ShowDerivationUtf8)?,
+    )
+    .map_err(PushProfileError::ShowDerivationParse)?;
+
+    let derivation_name = derivation_info
+        .keys()
+        .next()
+        .ok_or(PushProfileError::ShowDerivationEmpty)?;
+
+    info!(
+        "Building profile `{}` for node `{}`",
+        data.deploy_data.profile_name, data.deploy_data.node_name
+    );
 
     let mut build_command = if data.supports_flakes {
         Command::new("nix")
@@ -82,77 +99,11 @@ pub async fn push_profile(data: PushProfileData<'_>) -> Result<(), PushProfileEr
         Command::new("nix-build")
     };
 
-    let mut local_ca_data = CaData {
-        is_ca: false,
-        path: String::from(""),
-    };
-
-    if !&data
-        .deploy_data
-        .profile
-        .profile_settings
-        .path
-        .starts_with("/nix/store")
-    {
-        // we are not in a store path. Most likely we try to build a CA derivation
-        info!(
-            "The path {} does not start with \"nix/store\", so we will assume this is a content-addressed derivation",
-            &data.deploy_data.profile.profile_settings.path
-        );
-        if !data.supports_flakes {
-            return Err(PushProfileError::CADerivationNonFlake);
-        };
-        local_ca_data.is_ca = true;
-
-        //TODO: Is it always ".deploy"?
-        build_command.arg("build").arg(
-            data.repo.to_string()
-                + "#deploy.nodes."
-                + data.deploy_data.node_name
-                + ".profiles."
-                + data.deploy_data.profile_name
-                + ".path",
-        )
+    if data.supports_flakes {
+        build_command.arg("build").arg(derivation_name)
     } else {
-        // `nix-store --query --deriver` doesn't work on invalid paths, so we parse output of show-derivation :(
-        let mut show_derivation_command = Command::new("nix");
-
-        show_derivation_command
-            .arg("show-derivation")
-            .arg(&data.deploy_data.profile.profile_settings.path);
-
-        let show_derivation_output = show_derivation_command
-            .output()
-            .await
-            .map_err(PushProfileError::ShowDerivation)?;
-
-        match show_derivation_output.status.code() {
-            Some(0) => (),
-            a => return Err(PushProfileError::ShowDerivationExit(a)),
-        };
-
-        let derivation_info: HashMap<&str, serde_json::value::Value> = serde_json::from_str(
-            std::str::from_utf8(&show_derivation_output.stdout)
-                .map_err(PushProfileError::ShowDerivationUtf8)?,
-        )
-        .map_err(PushProfileError::ShowDerivationParse)?;
-
-        let derivation_name = derivation_info
-            .keys()
-            .next()
-            .ok_or(PushProfileError::ShowDerivationEmpty)?;
-
-        if data.supports_flakes {
-            build_command.arg("build").arg(derivation_name)
-        } else {
-            build_command.arg(derivation_name)
-        }
+        build_command.arg(derivation_name)
     };
-
-    info!(
-        "Building profile `{}` for node `{}`",
-        data.deploy_data.profile_name, data.deploy_data.node_name
-    );
 
     match (data.keep_result, data.supports_flakes) {
         (true, _) => {
@@ -171,123 +122,63 @@ pub async fn push_profile(data: PushProfileData<'_>) -> Result<(), PushProfileEr
         build_command.arg(extra_arg);
     }
 
-    if local_ca_data.is_ca {
-        debug!("Trying to catch output path after build of the CA derivation",);
-        // since this is a CA derivation, the original path is invalid
-        // we need to run "nix build" to return the actual path
-        build_command.arg("--print-out-paths");
+    let build_exit_status = build_command
+        // Logging should be in stderr, this just stops the store path from printing for no reason
+        .stdout(Stdio::null())
+        .status()
+        .await
+        .map_err(PushProfileError::Build)?;
 
-        let build_child = build_command
-            .stdout(Stdio::piped())
-            .spawn()
-            .map_err(PushProfileError::BuildErrorStart)?;
-
-        let build_output = build_child
-            .wait_with_output()
-            .await
-            .map_err(PushProfileError::BuildErrorRun)?;
-
-        match build_output.status.code() {
-            Some(0) => (),
-            a => return Err(PushProfileError::BuildErrorCode(a)),
-        };
-
-        let ca_path = String::from_utf8(build_output.stdout)
-            .unwrap()
-            .trim()
-            .to_string();
-        local_ca_data.path = ca_path;
-        debug!("Actual output path is {}", local_ca_data.path);
-    } else {
-        let build_exit_status = build_command
-            // Logging should be in stderr, this just stops the store path from printing for no reason
-            .stdout(Stdio::null())
-            .status()
-            .await
-            .map_err(PushProfileError::Build)?;
-
-        match build_exit_status.code() {
-            Some(0) => (),
-            a => return Err(PushProfileError::BuildExit(a)),
-        };
+    match build_exit_status.code() {
+        Some(0) => (),
+        a => return Err(PushProfileError::BuildExit(a)),
     };
 
-    if local_ca_data.is_ca {
-        let rs_deploy_path_ca = format!("{}/deploy-rs-activate", local_ca_data.path);
-        let rs_activate_path_ca = format!("{}/activate-rs", local_ca_data.path);
-
-        if !Path::new(rs_deploy_path_ca.as_str()).exists() {
-            return Err(PushProfileError::DeployRsActivateDoesntExist(
-                rs_deploy_path_ca.to_string(),
-            ));
-        }
-        if !Path::new(rs_activate_path_ca.as_str()).exists() {
-            return Err(PushProfileError::ActivateRsDoesntExist(
-                rs_activate_path_ca.to_string(),
-            ));
-        }
-        if let Ok(local_key) = std::env::var("LOCAL_KEY") {
-            info!(
-                "Signing key present! Signing profile `{}` for node `{}`",
-                data.deploy_data.profile_name, data.deploy_data.node_name
-            );
-
-            let sign_exit_status = Command::new("nix")
-                .arg("sign-paths")
-                .arg("-r")
-                .arg("-k")
-                .arg(local_key)
-                .arg(local_ca_data.path.to_string())
-                .status()
-                .await
-                .map_err(PushProfileError::Sign)?;
-
-            match sign_exit_status.code() {
-                Some(0) => (),
-                a => return Err(PushProfileError::SignExit(a)),
-            };
-        }
-    } else {
-        let rs_deploy_path = format!(
+    if !Path::new(
+        format!(
             "{}/deploy-rs-activate",
             data.deploy_data.profile.profile_settings.path
-        );
-        let rs_activate_path = format!(
+        )
+        .as_str(),
+    )
+    .exists()
+    {
+        return Err(PushProfileError::DeployRsActivateDoesntExist);
+    }
+
+    if !Path::new(
+        format!(
             "{}/activate-rs",
             data.deploy_data.profile.profile_settings.path
+        )
+        .as_str(),
+    )
+    .exists()
+    {
+        return Err(PushProfileError::ActivateRsDoesntExist);
+    }
+
+    if let Ok(local_key) = std::env::var("LOCAL_KEY") {
+        info!(
+            "Signing key present! Signing profile `{}` for node `{}`",
+            data.deploy_data.profile_name, data.deploy_data.node_name
         );
-        if !Path::new(rs_deploy_path.as_str()).exists() {
-            return Err(PushProfileError::DeployRsActivateDoesntExist(
-                rs_deploy_path.to_string(),
-            ));
-        }
-        if !Path::new(rs_activate_path.as_str()).exists() {
-            return Err(PushProfileError::ActivateRsDoesntExist(
-                rs_activate_path.to_string(),
-            ));
-        }
-        if let Ok(local_key) = std::env::var("LOCAL_KEY") {
-            info!(
-                "Signing key present! Signing profile `{}` for node `{}`",
-                data.deploy_data.profile_name, data.deploy_data.node_name
-            );
 
-            let sign_exit_status = Command::new("nix")
-                .arg("sign-paths")
-                .arg("-r")
-                .arg("-k")
-                .arg(local_key)
-                .arg(&data.deploy_data.profile.profile_settings.path)
-                .status()
-                .await
-                .map_err(PushProfileError::Sign)?;
+        let sign_exit_status = Command::new("nix")
+            .arg("sign-paths")
+            .arg("-r")
+            .arg("-k")
+            .arg(local_key)
+            .arg(&data.deploy_data.profile.profile_settings.path)
+            .status()
+            .await
+            .map_err(PushProfileError::Sign)?;
 
-            match sign_exit_status.code() {
-                Some(0) => (),
-                a => return Err(PushProfileError::SignExit(a)),
-            };
-        }
-    };
+        match sign_exit_status.code() {
+            Some(0) => (),
+            a => return Err(PushProfileError::SignExit(a)),
+        };
+    }
 
     info!(
         "Copying profile `{}` to node `{}`",
@@ -320,34 +211,18 @@ pub async fn push_profile(data: PushProfileData<'_>) -> Result<(), PushProfileEr
         None => &data.deploy_data.node.node_settings.hostname,
     };
 
-    if local_ca_data.is_ca {
-        let copy_exit_status = copy_command
-            .arg("--to")
-            .arg(format!("ssh://{}@{}", data.deploy_defs.ssh_user, hostname))
-            .arg(local_ca_data.path.to_string())
-            .env("NIX_SSHOPTS", ssh_opts_str)
-            .status()
-            .await
-            .map_err(PushProfileError::Copy)?;
+    let copy_exit_status = copy_command
+        .arg("--to")
+        .arg(format!("ssh://{}@{}", data.deploy_defs.ssh_user, hostname))
+        .arg(&data.deploy_data.profile.profile_settings.path)
+        .env("NIX_SSHOPTS", ssh_opts_str)
+        .status()
+        .await
+        .map_err(PushProfileError::Copy)?;
 
-        match copy_exit_status.code() {
-            Some(0) => (),
-            a => return Err(PushProfileError::CopyExit(a)),
-        };
-    } else {
-        let copy_exit_status = copy_command
-            .arg("--to")
-            .arg(format!("ssh://{}@{}", data.deploy_defs.ssh_user, hostname))
-            .arg(&data.deploy_data.profile.profile_settings.path)
-            .env("NIX_SSHOPTS", ssh_opts_str)
-            .status()
-            .await
-            .map_err(PushProfileError::Copy)?;
-
-        match copy_exit_status.code() {
-            Some(0) => (),
-            a => return Err(PushProfileError::CopyExit(a)),
-        };
+    match copy_exit_status.code() {
+        Some(0) => (),
+        a => return Err(PushProfileError::CopyExit(a)),
     };
 
     Ok(())
