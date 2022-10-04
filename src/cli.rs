@@ -537,7 +537,7 @@ async fn run_deploy(
         {
             continue;
         } else {
-            debug!("We've detected a CA derivation. To calculate the correct path, we will need to build it first.\n\
+            debug!("We've detected a CA derivation. To calculate the correct path, we will need to build it first. \
             This might take a while.");
             let new_path = match deploy::eval::eval_profile(deploy::eval::EvalProfileData {
                 supports_flakes,
@@ -552,7 +552,7 @@ async fn run_deploy(
             };
             if !new_path.is_empty() {
                 debug!(
-                    "Changing original deployment path {} to new nóne: {}",
+                    "Changing original deployment path {} to new one: {}",
                     deploy_data.profile.profile_settings.path, new_path
                 );
                 deploy_data.profile.profile_settings.path = new_path;
