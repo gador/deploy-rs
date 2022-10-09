@@ -529,14 +529,12 @@ async fn run_deploy(
         );
 
         // check if CA and build output path if necessary
-        if deploy_data
+        if !deploy_data
             .profile
             .profile_settings
             .path
             .starts_with("/nix/store")
         {
-            continue;
-        } else {
             debug!("We've detected a CA derivation. To calculate the correct path, we will need to build it first. \
             This might take a while.");
             let new_path = match deploy::eval::eval_profile(deploy::eval::EvalProfileData {
