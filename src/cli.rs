@@ -537,7 +537,7 @@ async fn run_deploy(
         {
             debug!("We've detected a CA derivation. To calculate the correct path, we will need to build it first. \
             This might take a while.");
-            let new_path = match deploy::eval::eval_profile(deploy::eval::EvalProfileData {
+            let new_path = match deploy::buildca::build_ca_profile(deploy::buildca::BuildCAProfileData {
                 supports_flakes,
                 repo: deploy_flake.repo,
                 deploy_data: &deploy_data,

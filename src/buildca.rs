@@ -4,7 +4,7 @@ use thiserror::Error;
 use tokio::process::Command;
 
 #[derive(Error, Debug)]
-pub enum EvalProfileError {
+pub enum BuildCAProfileError {
     #[error("Cannot build a content-addressed derivation without a flake.")]
     CADerivationNonFlake,
     #[error("Failed to start Nix build command: {0}")]
@@ -15,7 +15,7 @@ pub enum EvalProfileError {
     BuildErrorCode(Option<i32>),
 }
 
-pub struct EvalProfileData<'a> {
+pub struct BuildCAProfileData<'a> {
     pub supports_flakes: bool,
     pub repo: &'a str,
     pub deploy_data: &'a super::DeployData<'a>,
@@ -27,7 +27,7 @@ pub struct CaData {
     pub path: String, //the actual build path
 }
 
-pub async fn eval_profile(data: EvalProfileData<'_>) -> Result<String, EvalProfileError> {
+pub async fn build_ca_profile(data: BuildCAProfileData<'_>) -> Result<String, BuildCAProfileError> {
     // This function will just check for a CA derivation and evaluate (=build) it
     let mut local_ca_data = CaData {
         is_ca: false,
@@ -39,7 +39,7 @@ pub async fn eval_profile(data: EvalProfileData<'_>) -> Result<String, EvalProfi
             &data.deploy_data.profile.profile_settings.path
         );
     if !data.supports_flakes {
-        return Err(EvalProfileError::CADerivationNonFlake);
+        return Err(BuildCAProfileError::CADerivationNonFlake);
     };
     local_ca_data.is_ca = true;
     let mut build_command = Command::new("nix");
@@ -70,16 +70,16 @@ pub async fn eval_profile(data: EvalProfileData<'_>) -> Result<String, EvalProfi
     let build_child = build_command
         .stdout(Stdio::piped())
         .spawn()
-        .map_err(EvalProfileError::BuildErrorStart)?;
+        .map_err(BuildCAProfileError::BuildErrorStart)?;
 
     let build_output = build_child
         .wait_with_output()
         .await
-        .map_err(EvalProfileError::BuildErrorRun)?;
+        .map_err(BuildCAProfileError::BuildErrorRun)?;
 
     match build_output.status.code() {
         Some(0) => (),
-        a => return Err(EvalProfileError::BuildErrorCode(a)),
+        a => return Err(BuildCAProfileError::BuildErrorCode(a)),
     };
 
     let ca_path = String::from_utf8(build_output.stdout)
